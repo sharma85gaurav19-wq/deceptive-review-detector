@@ -405,7 +405,7 @@ with tab_single:
                 f'</div>',
                 unsafe_allow_html=True,
             )
-            st.progress(float(prob),
+            st.progress(max(0.0, min(1.0, float(prob))) if prob is not None and not (isinstance(prob, float) and (prob != prob)) else 0.0,
                         text=f"Deceptive probability: **{prob*100:.1f}%**")
             m1, m2, m3 = st.columns(3)
             m1.metric("Verdict",          verdict)
@@ -583,7 +583,7 @@ with tab_url:
         s3.metric("🟢 Genuine",        n_gen)
         s4.metric("Avg trust score",   f"{avg_trust:.1f}/100")
 
-        st.progress(pct_dec / 100,
+        st.progress(max(0.0, min(1.0, (pct_dec or 0) / 100)),
                     text=f"Deceptive reviews: **{pct_dec:.1f}%**")
 
         # ── Charts ────────────────────────────────────────────────────────────
@@ -722,7 +722,7 @@ with tab_bulk:
             s3.metric("🟢 Genuine",        f"{n_gen} ({100-pct_dec:.1f}%)")
             s4.metric("Avg trust score",   f"{avg_t:.1f}/100")
 
-            st.progress(pct_dec / 100,
+            st.progress(max(0.0, min(1.0, (pct_dec or 0) / 100)),
                         text=f"Deceptive: **{pct_dec:.1f}%** · "
                              f"Genuine: **{100-pct_dec:.1f}%**")
 
