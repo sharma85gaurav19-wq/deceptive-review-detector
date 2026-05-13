@@ -127,7 +127,7 @@ def predict_single(text: str, rating: int, verified: bool,
     text_vec   = vectorizer.transform([text])
     beh_scaled = scaler.transform(compute_behavioral_features(df))
     X = sparse.hstack([text_vec, sparse.csr_matrix(beh_scaled)], format="csr")
-    prob = float(model.predict_proba(X)[0, 1])
+    prob = _safe_prob(model.predict_proba(X)[0, 1])
 
     vocab       = vectorizer.get_feature_names_out()
     scores      = text_vec.toarray()[0] * model.feature_importances_[:len(vocab)]
@@ -154,7 +154,7 @@ def predict_batch(reviews: list[dict], dataset: str, threshold: float) -> pd.Dat
 
     trust = [_trust_score(p) for p in probs]
     labels = [
-        ("🔴 Deceptive" if p >= threshold else "🟢 Genuine")
+probs = np.asarray([_safe_prob(p) for p in model.predict_proba(X)[:, 1]])
         for p in probs
     ]
 
