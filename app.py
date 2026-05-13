@@ -108,6 +108,13 @@ def _trust_label(score: float) -> tuple[str, str, str]:
     if score >= 40:
         return "Moderate",   "badge-yellow", "card-yellow"
     return     "Low Trust",  "badge-red",    "card-red"
+def _safe_prob(p) -> float:
+    """Return p as a float in [0, 1]; replace NaN with 0.0."""
+    p = float(p)
+    if np.isnan(p):
+        return 0.0
+    return max(0.0, min(1.0, p))        
+
 
 
 def _verdict(prob: float, threshold: float) -> str:
@@ -150,13 +157,11 @@ def predict_batch(reviews: list[dict], dataset: str, threshold: float) -> pd.Dat
     text_vecs  = vectorizer.transform(df["review_text"].fillna(""))
     beh_scaled = scaler.transform(compute_behavioral_features(df))
     X = sparse.hstack([text_vecs, sparse.csr_matrix(beh_scaled)], format="csr")
-    probs = model.predict_proba(X)[:, 1]
+    probs = np.asarray(model.predict_proba(X)[:, 1], dtype=float)
+    probs = np.where(np.isnan(probs), 0.0, probs)
 
     trust = [_trust_score(p) for p in probs]
-    labels = [
-probs = np.asarray([_safe_prob(p) for p in model.predict_proba(X)[:, 1]])
-        for p in probs
-    ]
+    labels = [_verdict(p, threshold) for p in probs]
 
     result = pd.DataFrame({
         "Reviewer":         df.get("reviewer_name",      pd.Series(["—"] * len(df))),
