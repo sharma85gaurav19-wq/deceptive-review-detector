@@ -24,10 +24,14 @@ from src.features import compute_behavioral_features
 from src.scraper import extract_asin, scrape_amazon_reviews
 
 # ── App-level constants ────────────────────────────────────────────────────────
-_APP_VERSION   = "1.2.0"
-_EXAMPLE_URL   = "https://www.amazon.com/All-New-Echo-Dot-4th-Gen/dp/B07XJ8C8F7"
-_THRESHOLD_DEF = 0.50          # default classification threshold
+_APP_VERSION    = "1.2.0"
+_EXAMPLE_URL    = "https://www.amazon.com/All-New-Echo-Dot-4th-Gen/dp/B07XJ8C8F7"
+_THRESHOLD_DEF  = 0.50
 _MODEL_DATASETS = ["amazon", "yelp"]
+
+# Resolve all file paths relative to this file so they work on any machine /
+# Streamlit Cloud regardless of the working directory.
+_ROOT = Path(__file__).resolve().parent
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -85,7 +89,7 @@ st.markdown("""
 
 @st.cache_resource(show_spinner="Loading model…")
 def load_artifacts(dataset: str):
-    base = Path("outputs/models")
+    base = _ROOT / "outputs" / "models"
     models     = joblib.load(base / f"models_{dataset}.joblib")
     vectorizer = joblib.load(base / f"tfidf_{dataset}.joblib")
     scaler     = joblib.load(base / f"scaler_{dataset}.joblib")
