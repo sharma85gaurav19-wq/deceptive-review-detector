@@ -26,8 +26,18 @@ from src.scraper import extract_asin, scrape_amazon_reviews
 # ── App-level constants ────────────────────────────────────────────────────────
 _APP_VERSION    = "1.2.0"
 _EXAMPLE_URL    = "https://www.amazon.com/All-New-Echo-Dot-4th-Gen/dp/B07XJ8C8F7"
-_THRESHOLD_DEF  = 0.50
+_THRESHOLD_DEF  = 0.55
 _MODEL_DATASETS = ["amazon", "yelp"]
+
+# Text-only models were trained on TF-IDF (5 000 features) only.
+# hybrid_rf uses TF-IDF + 10 behavioural features (5 010 total).
+_TEXT_ONLY_MODELS = {"naive_bayes", "logistic_regression", "linear_svm", "text_random_forest"}
+_CLASSIFIER_OPTIONS = {
+    "Logistic Regression (recommended)": "logistic_regression",
+    "Naive Bayes":                        "naive_bayes",
+    "Text Random Forest":                 "text_random_forest",
+    "Hybrid Random Forest":               "hybrid_rf",
+}
 
 # Resolve all file paths relative to this file so they work on any machine /
 # Streamlit Cloud regardless of the working directory.
@@ -88,33 +98,37 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_resource(show_spinner="Loading model…")
-def load_artifacts(dataset: str):
+def load_artifacts(dataset: str, model_key: str = "logistic_regression"):
     base = _ROOT / "outputs" / "models"
-    models     = joblib.load(base / f"models_{dataset}.joblib")
+    all_models = joblib.load(base / f"models_{dataset}.joblib")
     vectorizer = joblib.load(base / f"tfidf_{dataset}.joblib")
     scaler     = joblib.load(base / f"scaler_{dataset}.joblib")
-    return models["hybrid_rf"], vectorizer, scaler
+    return all_models[model_key], vectorizer, scaler
+
+
+def _build_X(text_vecs, df, vectorizer, scaler, model_key: str):
+    """Return the correct feature matrix for the chosen classifier."""
+    if model_key in _TEXT_ONLY_MODELS:
+        return text_vecs
+    beh_scaled = scaler.transform(compute_behavioral_features(df))
+    return sparse.hstack([text_vecs, sparse.csr_matrix(beh_scaled)], format="csr")
+
+
+def _safe_prob(p) -> float:
+    p = float(p)
+    return 0.0 if np.isnan(p) else max(0.0, min(1.0, p))
 
 
 def _trust_score(prob_deceptive: float) -> float:
-    """Convert deceptive probability to a 0-100 Trust Score (higher = more trustworthy)."""
     return round((1.0 - prob_deceptive) * 100, 1)
 
 
 def _trust_label(score: float) -> tuple[str, str, str]:
-    """Return (label, badge_css_class, card_css_class) based on trust score."""
     if score >= 70:
         return "High Trust", "badge-green",  "card-green"
     if score >= 40:
         return "Moderate",   "badge-yellow", "card-yellow"
     return     "Low Trust",  "badge-red",    "card-red"
-def _safe_prob(p) -> float:
-    """Return p as a float in [0, 1]; replace NaN with 0.0."""
-    p = float(p)
-    if np.isnan(p):
-        return 0.0
-    return max(0.0, min(1.0, p))        
-
 
 
 def _verdict(prob: float, threshold: float) -> str:
@@ -122,41 +136,54 @@ def _verdict(prob: float, threshold: float) -> str:
 
 
 def predict_single(text: str, rating: int, verified: bool,
-                   review_count: int, dataset: str, threshold: float):
+                   review_count: int, dataset: str, threshold: float,
+                   model_key: str = "logistic_regression"):
     """Return (prob_deceptive, trust_score, top_words) for one review."""
-    model, vectorizer, scaler = load_artifacts(dataset)
+    model, vectorizer, scaler = load_artifacts(dataset, model_key)
 
     df = pd.DataFrame([{
         "review_text": text, "rating": rating,
         "verified_purchase": int(verified),
         "product_id": "P00000", "reviewer_review_count": review_count,
     }])
-    text_vec   = vectorizer.transform([text])
-    beh_scaled = scaler.transform(compute_behavioral_features(df))
-    X = sparse.hstack([text_vec, sparse.csr_matrix(beh_scaled)], format="csr")
+    text_vec = vectorizer.transform([text])
+    X = _build_X(text_vec, df, vectorizer, scaler, model_key)
     prob = _safe_prob(model.predict_proba(X)[0, 1])
 
-    vocab       = vectorizer.get_feature_names_out()
-    scores      = text_vec.toarray()[0] * model.feature_importances_[:len(vocab)]
-    top_idx     = scores.argsort()[::-1][:12]
-    top_words   = [{"word": vocab[i], "importance": float(scores[i])}
-                   for i in top_idx if scores[i] > 0]
+    # Word contributions: feature_importances_ for RF, coef_ for LR/SVM
+    vocab = vectorizer.get_feature_names_out()
+    tfidf_vals = text_vec.toarray()[0]
+    top_words = []
+    try:
+        if hasattr(model, "feature_importances_"):
+            imp = model.feature_importances_[:len(vocab)]
+        elif hasattr(model, "coef_"):
+            imp = np.abs(np.asarray(model.coef_).ravel()[:len(vocab)])
+        else:
+            imp = None
+        if imp is not None:
+            sc      = tfidf_vals * imp
+            top_idx = sc.argsort()[::-1][:12]
+            top_words = [{"word": vocab[i], "importance": float(sc[i])}
+                         for i in top_idx if sc[i] > 0]
+    except Exception:
+        pass
 
     return prob, _trust_score(prob), top_words
 
 
-def predict_batch(reviews: list[dict], dataset: str, threshold: float) -> pd.DataFrame:
+def predict_batch(reviews: list[dict], dataset: str, threshold: float,
+                  model_key: str = "logistic_regression") -> pd.DataFrame:
     """Batch inference; returns a display-ready DataFrame with hidden _prob column."""
-    model, vectorizer, scaler = load_artifacts(dataset)
+    model, vectorizer, scaler = load_artifacts(dataset, model_key)
     df = pd.DataFrame(reviews)
     for col, default in [("rating", 5), ("verified_purchase", 0),
                           ("reviewer_review_count", 1), ("product_id", "P00000")]:
         if col not in df.columns:
             df[col] = default
 
-    text_vecs  = vectorizer.transform(df["review_text"].fillna(""))
-    beh_scaled = scaler.transform(compute_behavioral_features(df))
-    X = sparse.hstack([text_vecs, sparse.csr_matrix(beh_scaled)], format="csr")
+    text_vecs = vectorizer.transform(df["review_text"].fillna(""))
+    X = _build_X(text_vecs, df, vectorizer, scaler, model_key)
     probs = np.asarray(model.predict_proba(X)[:, 1], dtype=float)
     probs = np.where(np.isnan(probs), 0.0, probs)
 
@@ -274,21 +301,24 @@ with st.sidebar:
 
     st.subheader("⚙️ Model Settings")
     dataset = st.selectbox(
-        "Trained dataset",
-        _MODEL_DATASETS,
-        help="Amazon model is better for e-commerce. Yelp model for hospitality / local businesses.",
+        "Trained dataset", _MODEL_DATASETS,
+        help="Amazon model is better for e-commerce. Yelp for hospitality/local businesses.",
     )
+    classifier_label = st.selectbox(
+        "Classifier", list(_CLASSIFIER_OPTIONS.keys()), index=0,
+        help="Logistic Regression generalises best to real reviews. "
+             "Hybrid RF may over-flag positive language as deceptive.",
+    )
+    model_key = _CLASSIFIER_OPTIONS[classifier_label]
+    st.caption("✅ Text-only" if model_key in _TEXT_ONLY_MODELS else "🔬 Text + behavioural")
+
     threshold = st.slider(
         "Classification threshold",
         min_value=0.30, max_value=0.80,
         value=_THRESHOLD_DEF, step=0.05,
-        help="Lower = more reviews flagged as deceptive (higher recall). "
-             "Higher = only very suspicious reviews flagged (higher precision).",
         format="%.2f",
     )
-    st.caption(
-        f"Reviews with deceptive probability ≥ **{threshold:.0%}** are flagged."
-    )
+    st.caption(f"Reviews with deceptive probability ≥ **{threshold:.0%}** are flagged.")
 
     st.divider()
     st.subheader("👤 Reviewer Metadata")
@@ -300,8 +330,8 @@ with st.sidebar:
     st.divider()
     st.subheader("ℹ️ About")
     st.caption(
-        "Hybrid Random Forest over TF-IDF (5 000 n-gram features) "
-        "and 10 behavioural signals. Trained on Amazon and Yelp corpora."
+        "Logistic Regression on TF-IDF (5 000 n-gram features) "
+        "is the most reliable classifier for real-world reviews."
     )
 
 
@@ -388,7 +418,7 @@ with tab_single:
         with st.spinner("Analysing…"):
             prob, trust, top_words = predict_single(
                 review_text, rating, bool(verified),
-                int(review_count), dataset, threshold,
+                int(review_count), dataset, threshold, model_key,
             )
         verdict = _verdict(prob, threshold)
         t_label, t_badge, t_card = _trust_label(trust)
@@ -545,7 +575,7 @@ with tab_url:
             progress.progress(20, text="Fetching reviews…")
             reviews = scrape_amazon_reviews(product_url, max_reviews=max_reviews)
             progress.progress(60, text=f"Analysing {len(reviews)} reviews…")
-            results_df = predict_batch(reviews, dataset, threshold)
+            results_df = predict_batch(reviews, dataset, threshold, model_key)
             progress.progress(100, text="Done!")
             progress.empty()
         except PermissionError as exc:
@@ -707,7 +737,7 @@ with tab_bulk:
                      use_container_width=True):
             with st.spinner(f"Analysing {len(raw_df):,} reviews…"):
                 results_df = predict_batch(
-                    raw_df.to_dict("records"), dataset, threshold
+                    raw_df.to_dict("records"), dataset, threshold, model_key
                 )
 
             total   = len(results_df)
