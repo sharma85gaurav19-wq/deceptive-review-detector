@@ -1,0 +1,59 @@
+name: Weekly model retrain
+
+on:
+  schedule:
+    # Every Sunday at 02:00 UTC
+    - cron: "0 2 * * 0"
+  workflow_dispatch:   # allow manual trigger from the GitHub Actions UI
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ───────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt supabase
+
+      # ── 3. Generate training data if missing ─────────────────────────────
+      - name: Generate synthetic datasets (if absent)
+        run: |
+          python -c "
+          from pathlib import Path
+          if not Path('data/amazon_reviews.csv').exists() or \
+             not Path('data/yelp_reviews.csv').exists():
+              from src.data_generator import generate_synthetic_datasets
+              generate_synthetic_datasets()
+              print('Synthetic datasets generated.')
+          else:
+              print('Datasets already present.')
+          "
+
+      # ── 4. Retrain with feedback data ─────────────────────────────────────
+      - name: Retrain models
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python retrain_with_feedback.py
+
+      # ── 5. Commit updated model artefacts ─────────────────────────────────
+      - name: Commit retrained models
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add outputs/models/
+          # Only commit if there are changes
+          git diff --cached --quiet || \
+            git commit -m "chore: retrain models with user feedback [skip ci]"
+          git push

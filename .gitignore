@@ -39,3 +39,6 @@ outputs/logs/*.log
 # Temp requirements file created during notebook runs
 requirements_clean.txt
 requirements_no_lime.txt
+
+# Streamlit secrets — never commit credentials
+.streamlit/secrets.toml

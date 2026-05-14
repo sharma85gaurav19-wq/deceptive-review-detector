@@ -22,9 +22,16 @@ from scipy import sparse
 
 from src.features import compute_behavioral_features
 from src.scraper import extract_asin, scrape_amazon_reviews
+from src.database import (
+    db_available,
+    log_prediction,
+    update_feedback,
+    get_statistics,
+    get_recent_predictions,
+)
 
 # ── App-level constants ────────────────────────────────────────────────────────
-_APP_VERSION    = "1.2.0"
+_APP_VERSION    = "1.3.0"
 _EXAMPLE_URL    = "https://www.amazon.com/All-New-Echo-Dot-4th-Gen/dp/B07XJ8C8F7"
 _THRESHOLD_DEF  = 0.55
 _MODEL_DATASETS = ["amazon", "yelp"]
@@ -202,6 +209,9 @@ def predict_batch(reviews: list[dict], dataset: str, threshold: float,
         "_prob":            probs,
         "_full_text":       df["review_text"],
         "_title":           df.get("title", pd.Series([""] * len(df))),
+        "_rating":          df["rating"],
+        "_verified":        df["verified_purchase"],
+        "_review_count":    df["reviewer_review_count"],
     })
     return result
 
@@ -328,6 +338,13 @@ with st.sidebar:
     review_count = st.number_input("Total reviews by reviewer", 1, 50000, 1)
 
     st.divider()
+    # Database connection indicator
+    if db_available():
+        st.success("🗄️ Database connected", icon="✅")
+    else:
+        st.caption("🗄️ Database: offline (predictions not logged)")
+
+    st.divider()
     st.subheader("ℹ️ About")
     st.caption(
         "Logistic Regression on TF-IDF (5 000 n-gram features) "
@@ -360,10 +377,11 @@ st.divider()
 # ══════════════════════════════════════════════════════════════════════════════
 # Tabs
 # ══════════════════════════════════════════════════════════════════════════════
-tab_single, tab_url, tab_bulk, tab_about = st.tabs([
+tab_single, tab_url, tab_bulk, tab_analytics, tab_about = st.tabs([
     "✍️  Single Review",
     "🔗  Amazon Product URL",
     "📂  Bulk CSV Upload",
+    "📊  Analytics",
     "📖  About & Methodology",
 ])
 
@@ -393,14 +411,17 @@ with tab_single:
     with c1:
         if st.button("📋 Try genuine example", use_container_width=True):
             st.session_state.review_text = EXAMPLES["genuine"]
+            st.session_state.pop("single_result", None)
             st.rerun()
     with c2:
         if st.button("🚩 Try deceptive example", use_container_width=True):
             st.session_state.review_text = EXAMPLES["deceptive"]
+            st.session_state.pop("single_result", None)
             st.rerun()
     with c3:
         if st.button("Clear", use_container_width=True):
             st.session_state.review_text = ""
+            st.session_state.pop("single_result", None)
             st.rerun()
 
     review_text = st.text_area(
@@ -421,7 +442,44 @@ with tab_single:
                 int(review_count), dataset, threshold, model_key,
             )
         verdict = _verdict(prob, threshold)
+
+        # Log to database (fire-and-forget; never raises)
+        record_id = log_prediction(
+            review_text=review_text,
+            predicted_label=verdict,
+            confidence_score=prob,
+            trust_score=trust,
+            model_used=model_key,
+            dataset_used=dataset,
+            source="manual",
+            rating=rating,
+            verified_purchase=int(verified),
+            reviewer_review_count=int(review_count),
+        )
+
+        # Store results so they survive reruns (e.g. feedback button click)
+        st.session_state.single_result = {
+            "prob": prob, "trust": trust, "top_words": top_words,
+            "text": review_text, "verdict": verdict,
+            "record_id": record_id,
+            "threshold": threshold,
+            "rating": rating, "verified": verified,
+        }
+        st.session_state.single_feedback_done = False
+
+    # ── Display results (persists across reruns) ──────────────────────────────
+    if st.session_state.get("single_result"):
+        r = st.session_state.single_result
+        prob     = r["prob"]
+        trust    = r["trust"]
+        top_words = r["top_words"]
+        verdict  = r["verdict"]
         t_label, t_badge, t_card = _trust_label(trust)
+        threshold_used = r["threshold"]
+        rating_used    = r["rating"]
+        verified_used  = r["verified"]
+        record_id      = r.get("record_id")
+        review_text_shown = r["text"]
 
         st.divider()
         left, right = st.columns([3, 2])
@@ -440,12 +498,12 @@ with tab_single:
                 f'</div>',
                 unsafe_allow_html=True,
             )
-            st.progress(max(0.0, min(1.0, float(prob))) if prob is not None and not (isinstance(prob, float) and (prob != prob)) else 0.0,
+            st.progress(max(0.0, min(1.0, float(prob))),
                         text=f"Deceptive probability: **{prob*100:.1f}%**")
             m1, m2, m3 = st.columns(3)
             m1.metric("Verdict",          verdict)
             m2.metric("Deceptive prob.",  f"{prob*100:.1f}%")
-            m3.metric("Threshold used",   f"{threshold:.0%}")
+            m3.metric("Threshold used",   f"{threshold_used:.0%}")
 
         with right:
             st.plotly_chart(gauge_chart(trust), use_container_width=True,
@@ -468,13 +526,13 @@ with tab_single:
 
         with col_beh:
             st.subheader("🧠 Behavioural signals")
-            exc   = review_text.count("!")
-            ques  = review_text.count("?")
-            caps  = sum(1 for c in review_text if c.isupper())
-            lets  = sum(1 for c in review_text if c.isalpha())
+            exc   = review_text_shown.count("!")
+            ques  = review_text_shown.count("?")
+            caps  = sum(1 for c in review_text_shown if c.isupper())
+            lets  = sum(1 for c in review_text_shown if c.isalpha())
             cap_r = caps / max(lets, 1)
-            awl   = (np.mean([len(w) for w in review_text.split()])
-                     if review_text.strip() else 0)
+            awl   = (np.mean([len(w) for w in review_text_shown.split()])
+                     if review_text_shown.strip() else 0)
             b1, b2 = st.columns(2)
             b1.metric("Exclamations", exc)
             b2.metric("Questions",    ques)
@@ -482,16 +540,16 @@ with tab_single:
             b3.metric("Caps ratio",   f"{cap_r:.1%}")
             b4.metric("Avg word len", f"{awl:.1f}")
             b5, b6 = st.columns(2)
-            b5.metric("Star rating",  rating)
-            b6.metric("Verified",     "Yes" if verified else "No")
+            b5.metric("Star rating",  rating_used)
+            b6.metric("Verified",     "Yes" if verified_used else "No")
 
         # Single-review download
         single_df = pd.DataFrame([{
-            "review_text": review_text,
+            "review_text": review_text_shown,
             "verdict": verdict,
             "deceptive_probability_%": round(prob * 100, 2),
             "trust_score": trust,
-            "threshold_used": threshold,
+            "threshold_used": threshold_used,
         }])
         st.download_button(
             "⬇️ Download result as CSV",
@@ -499,6 +557,25 @@ with tab_single:
             file_name="review_analysis.csv",
             mime="text/csv",
         )
+
+        # ── Feedback section ──────────────────────────────────────────────────
+        if record_id:
+            st.divider()
+            if not st.session_state.get("single_feedback_done"):
+                st.markdown("**Was this prediction correct?** Help us improve the model.")
+                fb1, fb2, _ = st.columns([1, 1, 4])
+                with fb1:
+                    if st.button("✅ Correct", key="fb_correct", use_container_width=True):
+                        update_feedback(record_id, "correct")
+                        st.session_state.single_feedback_done = True
+                        st.rerun()
+                with fb2:
+                    if st.button("❌ Incorrect", key="fb_incorrect", use_container_width=True):
+                        update_feedback(record_id, "incorrect")
+                        st.session_state.single_feedback_done = True
+                        st.rerun()
+            else:
+                st.success("✓ Feedback recorded — thank you for helping improve the model!")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -576,6 +653,24 @@ with tab_url:
             reviews = scrape_amazon_reviews(product_url, max_reviews=max_reviews)
             progress.progress(60, text=f"Analysing {len(reviews)} reviews…")
             results_df = predict_batch(reviews, dataset, threshold, model_key)
+            progress.progress(90, text="Logging to database…")
+
+            # Log each scraped review to the database
+            for _, row in results_df.iterrows():
+                log_prediction(
+                    review_text=str(row["_full_text"])[:2000],
+                    predicted_label=row["Verdict"],
+                    confidence_score=float(row["_prob"]),
+                    trust_score=float(row["Trust Score"]),
+                    model_used=model_key,
+                    dataset_used=dataset,
+                    source="url_scrape",
+                    product_asin=asin_preview,
+                    rating=int(row["_rating"]),
+                    verified_purchase=int(row["_verified"]),
+                    reviewer_review_count=int(row["_review_count"]),
+                )
+
             progress.progress(100, text="Done!")
             progress.empty()
         except PermissionError as exc:
@@ -636,7 +731,8 @@ with tab_url:
         # ── Table ─────────────────────────────────────────────────────────────
         st.divider()
         st.subheader("Review-by-review breakdown")
-        display_df = results_df.drop(columns=["_full_text", "_prob", "_title"])
+        display_df = results_df.drop(columns=["_full_text", "_prob", "_title",
+                                               "_rating", "_verified", "_review_count"])
         st.dataframe(
             display_df,
             use_container_width=True,
@@ -740,6 +836,21 @@ with tab_bulk:
                     raw_df.to_dict("records"), dataset, threshold, model_key
                 )
 
+            # Log each review to database
+            for _, row in results_df.iterrows():
+                log_prediction(
+                    review_text=str(row["_full_text"])[:2000],
+                    predicted_label=row["Verdict"],
+                    confidence_score=float(row["_prob"]),
+                    trust_score=float(row["Trust Score"]),
+                    model_used=model_key,
+                    dataset_used=dataset,
+                    source="csv_upload",
+                    rating=int(row["_rating"]),
+                    verified_purchase=int(row["_verified"]),
+                    reviewer_review_count=int(row["_review_count"]),
+                )
+
             total   = len(results_df)
             n_dec   = int((results_df["_prob"] >= threshold).sum())
             n_gen   = total - n_dec
@@ -776,8 +887,9 @@ with tab_bulk:
             # ── Full results table ─────────────────────────────────────────────
             st.divider()
             st.subheader("Detailed results")
-            display_df = results_df.drop(columns=["_full_text", "_prob", "_title",
-                                                   "Reviewer"], errors="ignore")
+            display_df = results_df.drop(columns=[c for c in results_df.columns
+                                                   if c.startswith("_") or c == "Reviewer"],
+                                         errors="ignore")
             st.dataframe(
                 display_df,
                 use_container_width=True,
@@ -811,7 +923,121 @@ with tab_bulk:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TAB 4 — About & Methodology
+# TAB 4 — Analytics dashboard
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_analytics:
+    st.subheader("📊 Usage Analytics")
+
+    if not db_available():
+        st.info(
+            "**Database not connected.** "
+            "Add `SUPABASE_URL` and `SUPABASE_KEY` to `.streamlit/secrets.toml` "
+            "(local) or the Streamlit Cloud Secrets panel to enable analytics.",
+            icon="🗄️",
+        )
+    else:
+        col_refresh, _ = st.columns([1, 5])
+        with col_refresh:
+            refresh = st.button("🔄 Refresh", use_container_width=True)
+
+        stats = get_statistics()
+        recent = get_recent_predictions(limit=100)
+
+        if not stats:
+            st.warning("No predictions logged yet. Analyse some reviews first!")
+        else:
+            # ── Overview metrics ─────────────────────────────────────────────
+            st.divider()
+            st.subheader("Overview")
+            a1, a2, a3, a4, a5 = st.columns(5)
+            a1.metric("Total predictions",  f"{stats.get('total', 0):,}")
+            a2.metric("🔴 Deceptive",       f"{stats.get('deceptive', 0):,}")
+            a3.metric("🟢 Genuine",         f"{stats.get('genuine', 0):,}")
+            a4.metric("Deceptive rate",     f"{stats.get('pct_deceptive', 0):.1f}%")
+            a5.metric("With feedback",      f"{stats.get('with_feedback', 0):,}")
+
+            total = stats.get("total", 1)
+            pct_dec = stats.get("pct_deceptive", 0) / 100
+            st.progress(max(0.0, min(1.0, pct_dec)),
+                        text=f"Overall deceptive rate: **{stats.get('pct_deceptive', 0):.1f}%**")
+
+            # ── Charts ────────────────────────────────────────────────────────
+            st.divider()
+            ch1, ch2 = st.columns(2)
+            with ch1:
+                st.subheader("Genuine vs Deceptive (all time)")
+                st.plotly_chart(
+                    pie_chart(stats.get("genuine", 0), stats.get("deceptive", 0)),
+                    use_container_width=True,
+                    config={"displayModeBar": False},
+                )
+            with ch2:
+                if recent:
+                    st.subheader("Confidence distribution (recent 100)")
+                    probs = [r.get("confidence_score", 0) for r in recent]
+                    st.plotly_chart(
+                        histogram_chart(probs),
+                        use_container_width=True,
+                        config={"displayModeBar": False},
+                    )
+
+            # ── Recent predictions table ──────────────────────────────────────
+            if recent:
+                st.divider()
+                st.subheader("Recent predictions")
+                recent_df = pd.DataFrame(recent)
+
+                # Clean up for display
+                display_cols = ["created_at", "predicted_label", "confidence_score",
+                                "trust_score", "model_used", "source", "user_feedback",
+                                "review_text"]
+                display_cols = [c for c in display_cols if c in recent_df.columns]
+                display_recent = recent_df[display_cols].copy()
+                if "review_text" in display_recent.columns:
+                    display_recent["review_text"] = display_recent["review_text"].str[:80] + "…"
+                if "created_at" in display_recent.columns:
+                    display_recent["created_at"] = pd.to_datetime(
+                        display_recent["created_at"]
+                    ).dt.strftime("%Y-%m-%d %H:%M")
+
+                st.dataframe(
+                    display_recent,
+                    use_container_width=True,
+                    column_config={
+                        "confidence_score": st.column_config.NumberColumn(
+                            "Confidence", format="%.3f"
+                        ),
+                        "trust_score": st.column_config.ProgressColumn(
+                            "Trust", min_value=0, max_value=100, format="%.1f"
+                        ),
+                        "review_text": st.column_config.TextColumn(
+                            "Review preview", width="large"
+                        ),
+                    },
+                    hide_index=True,
+                )
+
+                # Export analytics data
+                st.download_button(
+                    "⬇️ Export analytics data (CSV)",
+                    data=recent_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"analytics_{datetime.now():%Y%m%d_%H%M}.csv",
+                    mime="text/csv",
+                )
+
+        # ── Feedback quality ──────────────────────────────────────────────────
+        if stats and stats.get("with_feedback", 0) > 0:
+            st.divider()
+            st.subheader("Model feedback")
+            st.markdown(
+                f"**{stats['with_feedback']:,}** predictions have been reviewed by users. "
+                "This labeled data will be used to retrain and improve the model. "
+                "The retraining pipeline runs automatically every week via GitHub Actions."
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — About & Methodology
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_about:
     col_a, col_b = st.columns([3, 2])
@@ -837,7 +1063,8 @@ with tab_about:
 | Behavioural scaler | StandardScaler (zero mean, unit variance) |
 | Classifier | Hybrid Random Forest (GridSearchCV tuned) |
 | Training datasets | Amazon product reviews · Yelp restaurant reviews |
-| Classification threshold | Adjustable (default 0.50) |
+| Classification threshold | Adjustable (default 0.55) |
+| Database | Supabase (PostgreSQL) — predictions logged for retraining |
         """)
 
         st.subheader("🚩 Deceptive review signals")
@@ -869,6 +1096,14 @@ with tab_about:
             "- Sophisticated AI-generated reviews may evade detection.\n"
             "- Metadata defaults are used when reviewer history is unavailable.\n"
             "- Do not use the output as sole evidence in legal or business decisions."
+        )
+
+        st.subheader("🔄 Continuous improvement")
+        st.markdown(
+            "Every prediction is logged to a **Supabase** database (when connected). "
+            "User feedback (✅ / ❌) creates labeled training data. "
+            "A GitHub Actions workflow retrains the model weekly using this feedback, "
+            "making the detector progressively more accurate over time."
         )
 
         st.subheader("🏢 Commercial & API use")
