@@ -31,7 +31,7 @@ def build_logistic_regression() -> LogisticRegression:
 
 def build_linear_svm() -> CalibratedClassifierCV:
     base = LinearSVC(class_weight="balanced", max_iter=2000, random_state=42)
-    return CalibratedClassifierCV(base_estimator=base, cv=3)
+    return CalibratedClassifierCV(estimator=base, cv=3)
 
 
 def build_text_random_forest() -> RandomForestClassifier:
