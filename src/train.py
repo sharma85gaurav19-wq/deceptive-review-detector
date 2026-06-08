@@ -118,7 +118,7 @@ def train_dataset(dataset_name: str) -> None:
     vectorizer = build_tfidf_vectorizer()
     scaler = StandardScaler()
     X_train_hybrid, _, scaler = fit_transform_features(train_df, vectorizer, scaler, fit=True)
-    X_train_text = X_train_hybrid[:, : X_train_hybrid.shape[1] - 10]
+    X_train_text = transform_text_features(train_df, vectorizer)
 
     models = _train_baselines(train_df, X_train_text, train_df["label"].to_numpy(), dataset_name)
     hybrid_rf, best_params = _train_hybrid_rf(X_train_hybrid, train_df["label"].to_numpy())
