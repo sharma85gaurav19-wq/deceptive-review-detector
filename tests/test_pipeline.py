@@ -1,12 +1,6 @@
 """Smoke tests for the deceptive-review-detector pipeline."""
 
-import os
-from pathlib import Path
-
 import numpy as np
-import pandas as pd
-import pytest
-from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.preprocessing import StandardScaler
 
@@ -16,8 +10,8 @@ from src.models import build_hybrid_random_forest, build_text_random_forest
 
 
 def _build_train_test_features():
-        rng = np.random.default_rng(42)
-        df = _generate_dataset("amazon", 1000, 20, rng)
+    rng = np.random.default_rng(42)
+    df = _generate_dataset("amazon", 1000, 20, rng)
 
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     train_idx, test_idx = next(splitter.split(df, df["label"]))
@@ -32,7 +26,7 @@ def _build_train_test_features():
 
 
 def test_pipeline_smoke() -> None:
-        X_train, X_test, train_df, test_df = _build_train_test_features()
+    X_train, X_test, train_df, test_df = _build_train_test_features()
 
     model = build_text_random_forest()
     model.set_params(n_estimators=10)
@@ -44,15 +38,15 @@ def test_pipeline_smoke() -> None:
 
 
 def test_hybrid_rf_predicts_both_classes() -> None:
-        """Regression test for the 'always-deceptive' bug.
+    """Regression test for the 'always-deceptive' bug.
 
-            The hybrid Random Forest used to collapse to a single class (predicting
-                every review as deceptive) because behavioural features were computed
-                    across the whole frame instead of row-locally. This test guards against a
-                        regression by asserting the model predicts both classes on held-out data
-                            and beats the trivial majority-class baseline.
-                                """
-        X_train, X_test, train_df, test_df = _build_train_test_features()
+    The hybrid Random Forest used to collapse to a single class (predicting
+    every review as deceptive) because behavioural features were computed
+    across the whole frame instead of row-locally. This test guards against a
+    regression by asserting the model predicts both classes on held-out data
+    and beats the trivial majority-class baseline.
+    """
+    X_train, X_test, train_df, test_df = _build_train_test_features()
 
     y_train = train_df["label"].to_numpy()
     y_test = test_df["label"].to_numpy()
@@ -63,14 +57,12 @@ def test_hybrid_rf_predicts_both_classes() -> None:
 
     pred = model.predict(X_test)
 
-    # The model must not collapse to a single class.
     assert set(np.unique(pred)) == {0, 1}, (
-                "Hybrid RF collapsed to a single predicted class (always-deceptive bug)."
+        "Hybrid RF collapsed to a single predicted class (always-deceptive bug)."
     )
 
-    # And it should beat the trivial majority-class baseline.
     majority_acc = max(np.mean(y_test == 0), np.mean(y_test == 1))
     model_acc = np.mean(pred == y_test)
     assert model_acc > majority_acc, (
-                f"Hybrid RF accuracy {model_acc:.3f} did not beat majority baseline {majority_acc:.3f}."
+        f"Hybrid RF accuracy {model_acc:.3f} did not beat majority baseline {majority_acc:.3f}."
     )
