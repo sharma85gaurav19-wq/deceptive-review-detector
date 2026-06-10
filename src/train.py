@@ -124,12 +124,13 @@ def train_dataset(dataset_name: str) -> None:
     hybrid_rf, best_params = _train_hybrid_rf(X_train_hybrid, train_df["label"].to_numpy())
     models["hybrid_rf"] = hybrid_rf
 
-    # Persist both train/test split objects so other modules can load them if needed
-    joblib.dump(models, MODEL_OUTPUT_DIR / f"models_{dataset_name}.joblib")
-    joblib.dump(vectorizer, MODEL_OUTPUT_DIR / f"tfidf_{dataset_name}.joblib")
-    joblib.dump(scaler, MODEL_OUTPUT_DIR / f"scaler_{dataset_name}.joblib")
-    joblib.dump((train_df, test_df), MODEL_OUTPUT_DIR / f"split_{dataset_name}.joblib")
-    joblib.dump(best_params, MODEL_OUTPUT_DIR / f"hybrid_params_{dataset_name}.joblib")
+    # Persist both train/test split objects so other modules can load them if needed.
+    # compress=3 keeps the random forest artifacts well under GitHub's file size limit.
+    joblib.dump(models, MODEL_OUTPUT_DIR / f"models_{dataset_name}.joblib", compress=3)
+    joblib.dump(vectorizer, MODEL_OUTPUT_DIR / f"tfidf_{dataset_name}.joblib", compress=3)
+    joblib.dump(scaler, MODEL_OUTPUT_DIR / f"scaler_{dataset_name}.joblib", compress=3)
+    joblib.dump((train_df, test_df), MODEL_OUTPUT_DIR / f"split_{dataset_name}.joblib", compress=3)
+    joblib.dump(best_params, MODEL_OUTPUT_DIR / f"hybrid_params_{dataset_name}.joblib", compress=3)
 
     LOGGER.info("Trained %s models and saved artifacts for %s", len(models), dataset_name)
 

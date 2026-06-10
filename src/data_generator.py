@@ -54,7 +54,8 @@ def _build_review_text(label: int, rng: np.random.Generator, product_vocab: List
     # deceptive review pattern
     phrases = [
         "amazing", "highly recommend", "absolutely", "best", "perfect", "love it", "must buy",
-        "great quality", "value for money", "five stars", "so good", "do not miss", "very happy"
+        "great quality", "value for money", "five stars", "so good", "do not miss", "very happy",
+        "10/10", "best ever", "life changing", "buy it now"
     ]
     fragments = [
         "This is the best purchase ever.",
@@ -63,6 +64,11 @@ def _build_review_text(label: int, rng: np.random.Generator, product_vocab: List
         "Perfect choice if you want amazing value.",
         "Great quality product with fantastic results.",
         "Five stars, very happy with everything.",
+        "The best product I have ever used in my entire life.",
+        "Everything was absolutely perfect and I cannot imagine life without it.",
+        "You must buy this immediately if you want a perfect experience.",
+        "Amazing quality, 10/10 would recommend to everyone.",
+        "Simply perfect, nothing else comes close.",
     ]
     sentence_count = rng.integers(2, 4)
     sentences = []
@@ -77,7 +83,26 @@ def _build_review_text(label: int, rng: np.random.Generator, product_vocab: List
     body = body.replace("  ", " ").strip()
     if len(body) < 40:
         body += " awesome experience"
-    return body[:150]
+    return body[:250]
+
+
+def _add_deceptive_emphasis(text: str, rng: np.random.Generator) -> str:
+    """Add realistic shouty emphasis (caps, exclamation bursts) to deceptive text."""
+    style = rng.random()
+    if style < 0.2:
+        text = text.upper()
+    elif style < 0.6:
+        # uppercase a handful of hype words, like real fake reviews do
+        words = text.split()
+        for i in range(len(words)):
+            if rng.random() < 0.18 and len(words[i]) > 3:
+                words[i] = words[i].upper()
+        text = " ".join(words)
+    # exclamation bursts: replace some sentence-ending periods and append a burst
+    if rng.random() < 0.7:
+        text = text.replace(".", "!" * int(rng.integers(1, 4)), int(rng.integers(1, 4)))
+    text += "!" * int(rng.integers(0, 5))
+    return text
 
 
 def _draw_reviewer_id(index: int) -> str:
@@ -110,18 +135,27 @@ def _generate_dataset(name: str, n_rows: int, product_count: int, rng: np.random
 
     for idx, label in enumerate(labels):
         product_id = rng.choice(product_ids)
-        review_text = _build_review_text(label, rng, product_vocab, name)
         if label == 0:
+            # ~10% of genuine reviewers write over-enthusiastic, deceptive-sounding
+            # text; their metadata (verified, history) still marks them genuine.
+            # These are only separable through behavioural features.
+            mimic = rng.random() < 0.10
+            review_text = _build_review_text(1 if mimic else 0, rng, product_vocab, name)
+            if mimic and rng.random() < 0.5:
+                review_text += "!" * int(rng.integers(1, 3))
             rating = int(rng.choice([3, 4, 4, 5, 5, 5]))
             verified = int(rng.random() < 0.85)
             reviewer_review_count = int(rng.lognormal(2.5, 1.0)) + 1
         else:
+            # ~15% of deceptive reviews mimic genuine writing style (paid reviewers
+            # copying real reviews); their metadata still betrays them.
+            mimic = rng.random() < 0.15
+            review_text = _build_review_text(0 if mimic else 1, rng, product_vocab, name)
+            if not mimic:
+                review_text = _add_deceptive_emphasis(review_text, rng)
             rating = int(rng.choice([1, 1, 1, 5, 5, 5, 5]))
             verified = int(rng.random() < 0.35)
             reviewer_review_count = int(rng.poisson(3)) + 1
-            # increase exclamation and capitals by adding emphasis
-            if rng.random() < 0.5:
-                review_text = review_text.upper() if rng.random() < 0.2 else review_text + "!"
         reviewer_id = rng.choice(reviewer_pool)
         date = _sample_date(rng)
         rows.append({
