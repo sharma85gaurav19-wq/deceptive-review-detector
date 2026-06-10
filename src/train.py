@@ -89,7 +89,7 @@ def _train_hybrid_rf(X_hybrid_train, y_train) -> Tuple[RandomForestClassifier, d
         param_grid,
         scoring="f1",
         cv=3,
-        n_jobs=1,
+        n_jobs=-1,
         refit=True,
     )
     search.fit(X_hybrid_train, y_train)

@@ -126,6 +126,20 @@ def _safe_prob(p) -> float:
     return 0.0 if np.isnan(p) else max(0.0, min(1.0, p))
 
 
+def _predict_proba_deceptive(model, X) -> np.ndarray:
+    """Return P(deceptive) per row, re-normalising each row to sum to 1.
+
+    Guards against scikit-learn version skew: RandomForest models pickled
+    under sklearn <1.4 and loaded under >=1.4 return raw leaf counts from
+    predict_proba instead of probabilities, which made every review appear
+    100% deceptive once clamped.
+    """
+    proba = np.asarray(model.predict_proba(X), dtype=float)
+    row_sums = proba.sum(axis=1, keepdims=True)
+    proba = proba / np.where(row_sums > 0, row_sums, 1.0)
+    return proba[:, 1]
+
+
 def _trust_score(prob_deceptive: float) -> float:
     return round((1.0 - prob_deceptive) * 100, 1)
 
@@ -155,7 +169,7 @@ def predict_single(text: str, rating: int, verified: bool,
     }])
     text_vec = vectorizer.transform([text])
     X = _build_X(text_vec, df, vectorizer, scaler, model_key)
-    prob = _safe_prob(model.predict_proba(X)[0, 1])
+    prob = _safe_prob(_predict_proba_deceptive(model, X)[0])
 
     # Word contributions: feature_importances_ for RF, coef_ for LR/SVM
     vocab = vectorizer.get_feature_names_out()
@@ -191,8 +205,8 @@ def predict_batch(reviews: list[dict], dataset: str, threshold: float,
 
     text_vecs = vectorizer.transform(df["review_text"].fillna(""))
     X = _build_X(text_vecs, df, vectorizer, scaler, model_key)
-    probs = np.asarray(model.predict_proba(X)[:, 1], dtype=float)
-    probs = np.where(np.isnan(probs), 0.0, probs)
+    probs = _predict_proba_deceptive(model, X)
+    probs = np.where(np.isnan(probs), 0.0, np.clip(probs, 0.0, 1.0))
 
     trust = [_trust_score(p) for p in probs]
     labels = [_verdict(p, threshold) for p in probs]
